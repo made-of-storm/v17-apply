@@ -9,8 +9,9 @@
  *  3. По нажатию кнопки отправляет письмо-отказ заявителю и помечает сообщение
  *     в чате. «С правкой» — сначала присылает черновик: его можно отправить
  *     как есть или ответить на сообщение своим текстом.
- *  4. Раз в минуту смотрит Notion: если статус карточки сменили на Declined
- *     (отказ в CRM, не из Telegram) — в чате снимаются кнопки и пишется пометка.
+ *  4. Раз в минуту смотрит Notion: свежий Declined в CRM ведёт себя как
+ *     кнопка «Отказ (стандарт)» — письмо уходит, если в таблице или в карточке
+ *     есть email; в чате снимаются кнопки. Старые Declined не трогаем.
  *
  * Установка — см. README-НАСТРОЙКА.md. Кратко:
  *  - создать Google Таблицу → Расширения → Apps Script → вставить этот код
@@ -46,7 +47,7 @@ var CONFIG = {
   TEMPLATES_SHEET: 'Decline templates'
 };
 
-var BACKEND_VERSION = '2026-08-20b';
+var BACKEND_VERSION = '2026-08-25a';
 
 var SECRET_KEYS = ['NOTION_TOKEN', 'NOTION_DATA_SOURCE_ID', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID'];
 
@@ -515,14 +516,15 @@ function createNotionPage(d) {
   var financing = (d.interested_in || []).map(function (v) { return { name: finMap[v] || v }; });
 
   var notionLeadSource = sourceLabel(d) === SOURCE_LABEL_TG ? 'Telegram bot' : 'Website form';
+  var email = validEmail(d.contact_email);
   var properties = {
     'Name':            { title: rt((d.below_threshold ? '⚠️ ' : '') + (d.company_name || '(no name)')) },
-    'Email':           { email: d.contact_email || null },
     'Revenue ':        { number: num(d.mrr) },
     'Estimated Value': { number: num(d.amount_raising) },
     'Status':          { status: { name: 'Lead' } },
     'Lead Source':     { select: { name: notionLeadSource } }
   };
+  if (email) properties.Email = { email: email };
   if (type) properties['Type'] = { select: { name: type } };
   if (industries.length) properties['Industry '] = { multi_select: industries };
   if (financing.length) properties['Financing'] = { multi_select: financing };
@@ -533,7 +535,11 @@ function createNotionPage(d) {
   /* Первая строка карточки — откуда заявка (просьба Леры от 14.08). */
   children.push({ callout: {
     icon: { emoji: '🌐' },
-    rich_text: rt('Submitted through ' + sourceLabel(d))
+    rich_text: rt(
+      'Submitted through ' + sourceLabel(d) +
+      (d.stage ? ' · ' + d.stage : '') +
+      (d.website ? ' · ' + d.website : '')
+    )
   }});
   if (d.below_threshold) {
     children.push({ callout: {
@@ -956,6 +962,11 @@ function jsonResponse(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+function validEmail(v) {
+  var s = String(v || '').trim();
+  return s.indexOf('@') !== -1 ? s : '';
+}
+
 function isNotionDeclineName(name) {
   return /^(declined|rejected|отказ|decline)$/i.test(String(name || '').trim());
 }
@@ -968,130 +979,292 @@ function notionStatusFromPage(page) {
   return '';
 }
 
-/* Страницы CRM со статусом отказа. null = запрос не удался, дальше
-   проверяем открытые строки по одной. {} = запрос ок, отказов нет. */
-function fetchDeclinedNotionIds() {
+function notionTitleFromPage(page) {
+  var p = page && page.properties && page.properties.Name;
+  if (!p || !p.title) return '';
+  return p.title.map(function (t) {
+    return t.plain_text || (t.text && t.text.content) || '';
+  }).join('').trim();
+}
+
+function notionEmailFromPage(page) {
+  var p = page && page.properties && page.properties.Email;
+  return validEmail(p && p.email);
+}
+
+function declinedPageInfo(page) {
+  return {
+    id: notionPageId(page && (page.url || page.id)),
+    url: (page && page.url) || '',
+    title: notionTitleFromPage(page),
+    email: notionEmailFromPage(page),
+    last_edited_time: (page && page.last_edited_time) || ''
+  };
+}
+
+/* Первый прогон без курсора — только последние 3 часа, иначе все исторические
+   Declined в CRM (Moonly и десятки чужих сделок) всплывут как новые отказы. */
+var NOTION_SYNC_LOOKBACK_MS = 3 * 60 * 60 * 1000;
+var NOTION_SYNC_SINCE_KEY = 'notion_sync_since';
+var NOTION_DECLINE_SEEN_KEY = 'notion_decline_seen';
+
+function notionSyncSince() {
+  var stored = PropertiesService.getScriptProperties().getProperty(NOTION_SYNC_SINCE_KEY);
+  if (stored) return stored;
+  return new Date(Date.now() - NOTION_SYNC_LOOKBACK_MS).toISOString();
+}
+
+function markNotionSyncCursor(iso) {
+  PropertiesService.getScriptProperties().setProperty(NOTION_SYNC_SINCE_KEY, iso);
+}
+
+function declineSeenMap() {
+  var raw = PropertiesService.getScriptProperties().getProperty(NOTION_DECLINE_SEEN_KEY) || '[]';
+  var map = {};
+  try {
+    var ids = JSON.parse(raw);
+    if (ids && ids.length) {
+      ids.forEach(function (id) { if (id) map[id] = true; });
+    }
+  } catch (e) { /* битый JSON — начнём заново */ }
+  return map;
+}
+
+function rememberDeclineSeen(id, map) {
+  if (!id) return;
+  map[id] = true;
+}
+
+function persistDeclineSeen(map) {
+  var ids = Object.keys(map);
+  if (ids.length > 300) ids = ids.slice(ids.length - 300);
+  PropertiesService.getScriptProperties().setProperty(NOTION_DECLINE_SEEN_KEY, JSON.stringify(ids));
+}
+
+function isEditedSince(page, since) {
+  if (!since || !page || !page.last_edited_time) return true;
+  return String(page.last_edited_time) >= String(since);
+}
+
+/* Свежие Declined в CRM. null = запрос не удался; [] = ок, свежих нет. */
+function fetchRecentDeclinedPages(since) {
   if (!secret('NOTION_TOKEN') || !secret('NOTION_DATA_SOURCE_ID')) return null;
   var url = 'https://api.notion.com/v1/data_sources/' + secret('NOTION_DATA_SOURCE_ID') + '/query';
-  var filters = [
+  var timeFilter = since
+    ? { timestamp: 'last_edited_time', last_edited_time: { on_or_after: since } }
+    : null;
+  var statusFilters = [
     { property: 'Status', status: { equals: 'Declined' } },
     { property: 'Status', select: { equals: 'Declined' } }
   ];
   var lastError = '';
-  for (var f = 0; f < filters.length; f++) {
-    var ids = {};
-    try {
-      var cursor = null;
-      var pages = 0;
-      var ok = false;
-      do {
-        var body = { page_size: 100, filter: filters[f] };
-        if (cursor) body.start_cursor = cursor;
-        var resp = UrlFetchApp.fetch(url, {
-          method: 'post',
-          contentType: 'application/json',
-          headers: notionHeaders(),
-          payload: JSON.stringify(body),
-          muteHttpExceptions: true
-        });
-        var out = JSON.parse(resp.getContentText());
-        if (out.object === 'error') {
-          lastError = out.message || 'query error';
-          ok = false;
-          break;
-        }
-        ok = true;
-        (out.results || []).forEach(function (page) {
-          var id = notionPageId(page.url || page.id);
-          if (id) ids[id] = true;
-        });
-        cursor = out.has_more ? out.next_cursor : null;
-        pages++;
-      } while (cursor && pages < 10);
-      if (ok) return ids;
-    } catch (e) {
-      lastError = String(e);
+  var tryFilter = function (filter) {
+    var found = [];
+    var cursor = null;
+    var pages = 0;
+    do {
+      var body = { page_size: 100, filter: filter };
+      if (cursor) body.start_cursor = cursor;
+      var resp = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: notionHeaders(),
+        payload: JSON.stringify(body),
+        muteHttpExceptions: true
+      });
+      var out = JSON.parse(resp.getContentText());
+      if (out.object === 'error') {
+        lastError = out.message || 'query error';
+        return null;
+      }
+      (out.results || []).forEach(function (page) {
+        if (!isEditedSince(page, since)) return;
+        var info = declinedPageInfo(page);
+        if (info.id) found.push(info);
+      });
+      cursor = out.has_more ? out.next_cursor : null;
+      pages++;
+    } while (cursor && pages < 10);
+    return found;
+  };
+  var i;
+  if (timeFilter) {
+    for (i = 0; i < statusFilters.length; i++) {
+      var withTime = tryFilter({ and: [statusFilters[i], timeFilter] });
+      if (withTime) return withTime;
     }
   }
-  if (lastError) Logger.log('fetchDeclinedNotionIds: ' + lastError);
+  for (i = 0; i < statusFilters.length; i++) {
+    var withoutTime = tryFilter(statusFilters[i]);
+    if (withoutTime) return withoutTime;
+  }
+  if (lastError) Logger.log('fetchRecentDeclinedPages: ' + lastError);
   return null;
 }
 
-function applyNotionDeclineToRow(sheet, rowNum, company) {
-  var statusCol = SHEET_HEADERS.indexOf('Status') + 1;
-  var current = String(sheet.getRange(rowNum, statusCol).getValue() || '');
-  if (/^declined/i.test(current)) return;
-  sheet.getRange(rowNum, statusCol).setValue('declined (Notion)');
+function trySendStandardDecline(who) {
+  var email = validEmail(who && who.email);
+  if (!email) return { sent: false, reason: 'no_email' };
+  var templates = getDeclineTemplates();
+  var tpl = templates[0];
+  if (!tpl) return { sent: false, reason: 'no_template' };
+  var filled = {
+    name: (who && who.name) || 'there',
+    company: (who && who.company) || 'your company',
+    email: email
+  };
+  sendDeclineMail(email, fillTemplate(tpl.subject, filled), fillTemplate(tpl.body, filled));
+  return { sent: true, email: email, label: tpl.label };
+}
 
-  var tgCol = SHEET_HEADERS.indexOf('Telegram message id') + 1;
-  var messageId = sheet.getRange(rowNum, tgCol).getValue();
+function mailNote(mail) {
+  if (mail && mail.sent) {
+    return 'Письмо-отказ («' + esc(mail.label || 'стандарт') + '») отправлено на ' + esc(mail.email) + '.';
+  }
+  if (mail && mail.reason === 'no_template') return 'Письмо не отправлено: нет шаблона отказа.';
+  if (mail && mail.reason && mail.reason !== 'no_email') {
+    return 'Письмо не отправлено: ' + esc(mail.reason);
+  }
+  return 'Письмо не отправлено: в карточке нет email.';
+}
+
+function notifyDeclineInTelegram(company, messageId, mail, extra) {
   var chatId = tgChatId();
-  if (messageId && secret('TELEGRAM_TOKEN') && chatId) {
+  if (!secret('TELEGRAM_TOKEN') || !chatId) return;
+  if (messageId) {
     tg('editMessageReplyMarkup', {
       chat_id: chatId,
       message_id: String(messageId),
       reply_markup: { inline_keyboard: [] }
     });
   }
-  if (secret('TELEGRAM_TOKEN') && chatId) {
-    var payload = {
-      chat_id: chatId,
-      text: '❌ <b>Отказ в Notion</b> — ' + esc(company || 'заявка') +
-        '\nКнопки в Telegram сняты, письмо не отправлялось (отказ сделан в CRM).',
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    };
-    if (messageId) payload.reply_to_message_id = String(messageId);
-    tg('sendMessage', payload);
-  }
+  var text = '❌ <b>Отказ в Notion</b> — ' + esc(company || 'заявка') + '\n' + mailNote(mail);
+  if (extra) text += '\n' + extra;
+  var payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+  if (messageId) payload.reply_to_message_id = String(messageId);
+  tg('sendMessage', payload);
 }
 
-/* Раз в минуту: отказ, поставленный в Notion, догоняет таблицу и Telegram.
-   Письмо-отказ отсюда не шлём — в CRM могли отказать без стандартного шаблона. */
+function applyNotionDeclineToRow(sheet, rowNum, page) {
+  var statusCol = SHEET_HEADERS.indexOf('Status') + 1;
+  var current = String(sheet.getRange(rowNum, statusCol).getValue() || '');
+  if (/^declined/i.test(current)) return;
+  var who = applicantAt(sheet, rowNum);
+  who.email = validEmail(who.email) || (page && page.email) || '';
+  if (page && page.title && (!who.company || who.company === 'your company')) {
+    who.company = page.title;
+  }
+  var mail = { sent: false, reason: 'no_email' };
+  try {
+    mail = trySendStandardDecline(who);
+  } catch (e) {
+    mail = { sent: false, reason: String(e) };
+    Logger.log('trySendStandardDecline: ' + e);
+  }
+  sheet.getRange(rowNum, statusCol).setValue(mail.sent ? 'declined (Notion)' : 'declined (Notion, no email)');
+  var messageId = sheet.getRange(rowNum, SHEET_HEADERS.indexOf('Telegram message id') + 1).getValue();
+  notifyDeclineInTelegram(who.company || (page && page.title), messageId, mail, '');
+}
+
+function applyNotionDeclineCrmOnly(page) {
+  var who = {
+    email: page && page.email,
+    name: 'there',
+    company: (page && page.title) || 'your company'
+  };
+  var mail = { sent: false, reason: 'no_email' };
+  try {
+    mail = trySendStandardDecline(who);
+  } catch (e) {
+    mail = { sent: false, reason: String(e) };
+    Logger.log('trySendStandardDecline: ' + e);
+  }
+  notifyDeclineInTelegram(
+    who.company,
+    '',
+    mail,
+    'Карточка из CRM, строки заявки в таблице нет.'
+  );
+}
+
+function sheetRowsByNotionId(sheet) {
+  var last = sheet.getLastRow();
+  var map = {};
+  if (last < 2) return map;
+  var notionIdx = SHEET_HEADERS.indexOf('Notion URL');
+  var rows = sheet.getRange(2, 1, last - 1, SHEET_HEADERS.length).getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var id = notionPageId(rows[i][notionIdx]);
+    if (id) map[id] = i + 2;
+  }
+  return map;
+}
+
+/* Раз в минуту: свежий отказ в Notion = тот же стандартный отказ, что кнопка в TG.
+   Без курсора по last_edited_time старые CRM-сделки не трогаем и писем им не шлём. */
 function syncNotionToTelegram() {
   if (!secret('NOTION_TOKEN') || !secret('NOTION_DATA_SOURCE_ID')) return;
+  var started = new Date().toISOString();
+  var since = notionSyncSince();
+  var seen = declineSeenMap();
   var sheet = getSheet();
-  var last = sheet.getLastRow();
-  if (last < 2) return;
-  var statusIdx = SHEET_HEADERS.indexOf('Status');
-  var notionIdx = SHEET_HEADERS.indexOf('Notion URL');
-  var companyIdx = SHEET_HEADERS.indexOf('Company');
-  var rows = sheet.getRange(2, 1, last - 1, SHEET_HEADERS.length).getValues();
-  var open = [];
-  for (var i = 0; i < rows.length; i++) {
-    var st = String(rows[i][statusIdx] || '');
-    var notionUrl = rows[i][notionIdx];
-    if (/^declined/i.test(st)) continue;
-    if (!notionUrl || String(notionUrl).indexOf('ERROR') === 0) continue;
-    open.push({ rowNum: i + 2, notionUrl: notionUrl, company: rows[i][companyIdx] });
-  }
-  if (!open.length) return;
+  var byId = sheetRowsByNotionId(sheet);
+  var pages = fetchRecentDeclinedPages(since);
 
-  var declined = fetchDeclinedNotionIds();
-  if (!declined) open = open.slice(0, 25);
-  open.forEach(function (item) {
-    var id = notionPageId(item.notionUrl);
-    if (!id) return;
-    var hit = declined
-      ? declined[id]
-      : isNotionDeclineName(fetchNotionPageStatus(item.notionUrl));
-    if (hit) applyNotionDeclineToRow(sheet, item.rowNum, item.company);
+  if (!pages) {
+    var openIds = Object.keys(byId).filter(function (id) {
+      return !seen[id];
+    }).slice(0, 25);
+    pages = [];
+    openIds.forEach(function (id) {
+      var page = fetchNotionPage(id);
+      if (!page || !isNotionDeclineName(notionStatusFromPage(page))) return;
+      if (!isEditedSince(page, since)) return;
+      pages.push(declinedPageInfo(page));
+    });
+  }
+
+  var ok = true;
+  pages.forEach(function (page) {
+    if (!page.id || seen[page.id]) return;
+    try {
+      var rowNum = byId[page.id];
+      if (rowNum) applyNotionDeclineToRow(sheet, rowNum, page);
+      else applyNotionDeclineCrmOnly(page);
+      rememberDeclineSeen(page.id, seen);
+    } catch (e) {
+      ok = false;
+      Logger.log('syncNotionToTelegram page ' + page.id + ': ' + e);
+    }
   });
+  persistDeclineSeen(seen);
+  if (ok) markNotionSyncCursor(started);
 }
 
-function fetchNotionPageStatus(notionUrl) {
-  var id = notionPageId(notionUrl);
-  if (!id || !secret('NOTION_TOKEN')) return '';
+function fetchNotionPage(idOrUrl) {
+  var id = notionPageId(idOrUrl);
+  if (!id || !secret('NOTION_TOKEN')) return null;
   try {
     var resp = UrlFetchApp.fetch('https://api.notion.com/v1/pages/' + id, {
       headers: notionHeaders(),
       muteHttpExceptions: true
     });
-    return notionStatusFromPage(JSON.parse(resp.getContentText()));
+    var out = JSON.parse(resp.getContentText());
+    if (out.object === 'error') return null;
+    return out;
   } catch (e) {
-    Logger.log('fetchNotionPageStatus: ' + e);
-    return '';
+    Logger.log('fetchNotionPage: ' + e);
+    return null;
   }
+}
+
+function fetchNotionPageStatus(notionUrl) {
+  return notionStatusFromPage(fetchNotionPage(notionUrl));
 }
 
 /* Одноразовый запуск: включает обработку кнопок Telegram и синк отказа из Notion.
