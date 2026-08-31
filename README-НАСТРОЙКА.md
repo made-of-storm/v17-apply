@@ -88,8 +88,7 @@
    **Не** ставить `loading="lazy"` на iframe — это ухудшает PageSpeed на /apply.
 
 **SEO:** индексировать нужно `https://v17.vc/apply`, а не копию на GitHub Pages.
-В `index.html` стоят `noindex` и canonical на v17.vc/apply. Подробный чеклист
-по всему SEO-аудиту — в файле `SEO-ИНСТРУКЦИИ.md`.
+В `index.html` стоят `noindex` и canonical на v17.vc/apply.
 
 ### 6. Проверка
 - Отправить тестовую заявку с сайта → строка в таблице + карточка в Notion +
