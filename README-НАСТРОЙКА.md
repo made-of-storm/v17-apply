@@ -83,8 +83,13 @@
 1. В `index.html` вписать URL веб-приложения в `SUBMIT_URL`
 2. Залить на GitHub Pages (отдельный репозиторий, Settings → Pages)
 3. В Тильде на нужной странице: блок **T123 «HTML-код»** →
-   `<iframe src="https://<адрес формы>" style="width:100%;height:1400px;border:0" loading="lazy"></iframe>`
-   (высоту подогнать по месту; на мобиле форма сама адаптируется)
+   вставить содержимое файла `tilda-apply-page.html` (там уже правильный URL
+   `https://made-of-storm.github.io/v17-apply/` и автовысота iframe).
+   **Не** ставить `loading="lazy"` на iframe — это ухудшает PageSpeed на /apply.
+
+**SEO:** индексировать нужно `https://v17.vc/apply`, а не копию на GitHub Pages.
+В `index.html` стоят `noindex` и canonical на v17.vc/apply. Подробный чеклист
+по всему SEO-аудиту — в файле `SEO-ИНСТРУКЦИИ.md`.
 
 ### 6. Проверка
 - Отправить тестовую заявку с сайта → строка в таблице + карточка в Notion +
