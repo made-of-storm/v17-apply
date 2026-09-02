@@ -39,10 +39,12 @@ var CONFIG = {
 
   SHEET_NAME: 'Applications',
   SETTINGS_SHEET: 'Settings',
-  TEMPLATES_SHEET: 'Decline templates'
+  TEMPLATES_SHEET: 'Decline templates',
+  /* Тестовые заявки (см. isTestSubmission) пишутся сюда, без Notion и Telegram. */
+  TEST_SHEET_NAME: 'Tests'
 };
 
-var BACKEND_VERSION = '2026-09-02a';
+var BACKEND_VERSION = '2026-09-02b';
 
 /* ==========================================================================
    НАСТРОЙКИ БЕЗ ПРОГРАММИСТА.
@@ -221,6 +223,54 @@ function getSheet() {
   return sheet;
 }
 
+/* Тестовые заявки не попадают в Applications / Notion / Telegram — только
+   на лист Tests. Признаки: тестовый email, «test/e2e/тест» в названии компании,
+   source с пометкой test (cursor-agent-test, node-test и т.п.). */
+function isTestSubmission(d) {
+  var email = String((d && d.contact_email) || '').trim().toLowerCase();
+  var company = String((d && d.company_name) || '').trim();
+  var source = String((d && d.source) || '').trim().toLowerCase();
+
+  if (/^e2e-test-/.test(email) || /@example\.com$/.test(email) || /@acme\.test$/.test(email)) {
+    return 'test email: ' + email;
+  }
+  if (/\b(e2e|test|тест)\b/i.test(company)) {
+    return 'test company: ' + company;
+  }
+  if (source === 'test' || source === 'node-test' || /^cursor-.*test/.test(source) || /-test$/.test(source)) {
+    return 'test source: ' + source;
+  }
+  return '';
+}
+
+function getTestSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var headers = SHEET_HEADERS.concat(['Test reason']);
+  var sheet = ss.getSheetByName(CONFIG.TEST_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.TEST_SHEET_NAME);
+    sheet.setFrozenRows(1);
+  }
+  var head = sheet.getRange(1, 1, 1, headers.length);
+  if (String(head.getValues()[0]) !== String(headers)) head.setValues([headers]);
+  return sheet;
+}
+
+function buildSubmissionRow(d, joined, safe) {
+  return [
+    d.submitted_at || new Date().toISOString(),
+    d.below_threshold ? 'YES' : '',
+    d.company_name || '', d.website || '',
+    joined(d.segment).toUpperCase(), d.stage || '', d.market_text,
+    d.mrr || '', joined(d.interested_in), d.amount_raising || '', d.post_money || '',
+    d.verticals_text, safe(d.problem || ''), d.pitch_deck || '', safe(d.icp || ''), safe(d.team || ''),
+    d.ret30 || '', d.ret60 || '', d.ret90 || '', d.cac || '', d.ltv || '', d.session || '',
+    safe(d.payback || ''), safe(d.sub_model || ''), d.organic_pct || '', safe(d.mrr_growth || ''), d.marketing_spend || '',
+    safe(d.contact_name || ''), d.contact_email || '', safe(d.notes || ''),
+    'new', '', sourceLabel(d)
+  ];
+}
+
 /* Пометка источника — просьба Леры от 14.08. Сайт шлёт source=site_form,
    публичный Telegram-бот шлёт source=telegram_bot. */
 var SOURCE_LABEL = 'Website form (v17.vc/apply)';
@@ -245,11 +295,12 @@ function handleFormSubmission(d) {
   var safe = function (v) {
     return (typeof v === 'string' && /^[=+\-]/.test(v)) ? "'" + v : v;
   };
+  var testReason = isTestSubmission(d);
 
   /* Pitch deck по ТЗ — ссылка ИЛИ файл. Файл приходит base64 → кладём
      на Google Drive и дальше везде используем ссылку. */
   var deck = d.pitch_deck || '';
-  if (d.pitch_deck_file && d.pitch_deck_file.data) {
+  if (!testReason && d.pitch_deck_file && d.pitch_deck_file.data) {
     try {
       var fileUrl = saveDeckFile(d);
       deck = deck ? deck + ' · ' + fileUrl : fileUrl;
@@ -267,20 +318,26 @@ function handleFormSubmission(d) {
      вообще не доходит — заявка не сохраняется). */
   d.below_threshold = !!(d.below_soft_threshold || d.hard_filter_failed);
 
+  if (testReason) {
+    var testSheet = getTestSheet();
+    var testRow = buildSubmissionRow(d, joined, safe);
+    testRow[SHEET_HEADERS.indexOf('Status')] = 'test';
+    testRow.push(testReason);
+    testSheet.appendRow(testRow);
+    Logger.log('Test submission isolated: ' + testReason);
+    return jsonResponse({
+      ok: true,
+      test: true,
+      test_reason: testReason,
+      backend_version: BACKEND_VERSION,
+      telegram_notified: false,
+      notion_created: false
+    });
+  }
+
   var sheet = getSheet();
   var statusCol = SHEET_HEADERS.indexOf('Status') + 1;
-  var row = [
-    d.submitted_at || new Date().toISOString(),
-    d.below_threshold ? 'YES' : '',
-    d.company_name || '', d.website || '',
-    joined(d.segment).toUpperCase(), d.stage || '', d.market_text,
-    d.mrr || '', joined(d.interested_in), d.amount_raising || '', d.post_money || '',
-    d.verticals_text, safe(d.problem || ''), d.pitch_deck || '', safe(d.icp || ''), safe(d.team || ''),
-    d.ret30 || '', d.ret60 || '', d.ret90 || '', d.cac || '', d.ltv || '', d.session || '',
-    safe(d.payback || ''), safe(d.sub_model || ''), d.organic_pct || '', safe(d.mrr_growth || ''), d.marketing_spend || '',
-    safe(d.contact_name || ''), d.contact_email || '', safe(d.notes || ''),
-    'new', '', sourceLabel(d)
-  ];
+  var row = buildSubmissionRow(d, joined, safe);
   sheet.appendRow(row);
   var rowNum = sheet.getLastRow();
 
