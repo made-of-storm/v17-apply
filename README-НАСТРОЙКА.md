@@ -92,8 +92,10 @@
 - DKIM: включить в Google Workspace → Admin → Apps → Google Workspace → Gmail → Authenticate email
 - DMARC: `v=DMARC1; p=none; rua=mailto:team@v17.vc`
 
-Пока алиас не настроен, скрипт шлёт с личного ящика владельца — Telegram покажет
-предупреждение ⚠️. Лимит Gmail: ~100 писем/день.
+Пока алиас не настроен, кнопки отказа в Telegram покажут ошибку. Лимит Gmail: ~100 писем/день.
+
+**Альтернатива:** перенести таблицу и Apps Script на аккаунт `noreply@v17.vc`
+(или `team@v17.vc`) в Google Workspace — тогда личный Gmail вообще не участвует.
 
 ### 5. Форма → хостинг → Тильда
 1. В `index.html` вписать URL веб-приложения в `SUBMIT_URL`
