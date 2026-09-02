@@ -36,7 +36,7 @@ log = logging.getLogger("v17-apply-bot")
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 SUBMIT_URL = os.environ.get(
     "SUBMIT_URL",
-    "https://script.google.com/macros/s/AKfycbxnTuK2UxFXKCc2lswSbVNU2bzEbS-eJMHl_4DPBw7yb0AX3d7nbMLAK9u4R6mOvlGV/exec",
+    "https://script.google.com/macros/s/AKfycbx30DBhsRrIxt55Y6MslmZvwqp9dTLhITs27Wdq2M5lpZ8yJZypa7Ryuu1oIzl_13Z2SA/exec",
 ).strip()
 PROXY_URL = os.environ.get(
     "PROXY_URL",
