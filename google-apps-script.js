@@ -28,10 +28,10 @@ var CONFIG = {
   TELEGRAM_CHAT_ID: '',    // id чата заявок (см. README, шаг 3)
 
   // Почта для отказов: noreply@v17.vc (решение Леры 13.08 — на неё не отвечают).
-  // ⚠️ Чтобы Gmail разрешил слать «от» этого адреса, ящик должен существовать
-  // и быть добавлен алиасом в Gmail владельца скрипта (Настройки → Аккаунты
-  // и импорт → «Отправлять письма как»). Пока алиас не настроен, скрипт
-  // автоматически отправит письмо с основного ящика (см. sendDeclineMail).
+  // Ящик должен быть добавлен в Gmail владельца скрипта: Настройки → Аккаунты
+  // → «Отправлять письма как» → noreply@v17.vc (SMTP smtp.gmail.com:587).
+  // Пока алиас не подтверждён — sendDeclineMail вернёт usedFallback: true
+  // и в Telegram придёт предупреждение (см. README-НАСТРОЙКА.md, шаг 4).
   MAIL_FROM_ALIAS: 'noreply@v17.vc',
   MAIL_FROM_NAME: 'V17 Team',
   // Reply-To не ставим: письма идут с noreply, ответы не предполагаются.
@@ -42,7 +42,7 @@ var CONFIG = {
   TEMPLATES_SHEET: 'Decline templates'
 };
 
-var BACKEND_VERSION = '2026-08-18a';
+var BACKEND_VERSION = '2026-09-02a';
 
 /* ==========================================================================
    НАСТРОЙКИ БЕЗ ПРОГРАММИСТА.
@@ -314,22 +314,65 @@ function handleFormSubmission(d) {
   });
 }
 
-/* Письмо-отказ. Пытаемся отправить от noreply@v17.vc; если алиас ещё
-   не настроен в Gmail владельца скрипта (или ящик не создан) — Gmail кинет
-   ошибку, тогда шлём с основного ящика, чтобы отказ не потерялся. */
+/* Письмо-отказ. Только с noreply@v17.vc — без fallback на личный ящик
+   владельца скрипта (иначе письма уходят «от V17» с личной почты).
+   Алиас настраивается в Gmail: Настройки → Отправлять письма как. */
 function sendDeclineMail(email, subject, body) {
-  var opts = { name: CONFIG.MAIL_FROM_NAME };
-  if (CONFIG.MAIL_REPLY_TO) opts.replyTo = CONFIG.MAIL_REPLY_TO;
-  if (CONFIG.MAIL_FROM_ALIAS) {
-    try {
-      opts.from = CONFIG.MAIL_FROM_ALIAS;
-      GmailApp.sendEmail(email, subject, body, opts);
-      return;
-    } catch (e) {
-      delete opts.from;
-    }
+  if (!CONFIG.MAIL_FROM_ALIAS) {
+    return { ok: false, error: 'MAIL_FROM_ALIAS не задан' };
   }
-  GmailApp.sendEmail(email, subject, body, opts);
+  var opts = {
+    from: CONFIG.MAIL_FROM_ALIAS,
+    name: CONFIG.MAIL_FROM_NAME,
+    htmlBody: declineHtmlBody(body)
+  };
+  if (CONFIG.MAIL_REPLY_TO) opts.replyTo = CONFIG.MAIL_REPLY_TO;
+  try {
+    GmailApp.sendEmail(email, subject, body, opts);
+    return { ok: true, from: CONFIG.MAIL_FROM_ALIAS, usedFallback: false };
+  } catch (e) {
+    Logger.log('sendDeclineMail failed: ' + e);
+    return {
+      ok: false,
+      error: 'Не удалось отправить с ' + CONFIG.MAIL_FROM_ALIAS +
+        '. Добавьте ящик в Gmail владельца скрипта: Настройки → Аккаунты → ' +
+        '«Отправлять письма как» → noreply@v17.vc (SMTP smtp.gmail.com:587).'
+    };
+  }
+}
+
+function mailResultNote(result) {
+  if (!result || result.ok) {
+    return result && result.from ? ' · от ' + result.from : '';
+  }
+  return ' ⚠️ ' + result.error;
+}
+
+/* Тест отправки: Apps Script → выбрать testDeclineMail → Выполнить.
+   Впишите TEST_DECLINE_TO ниже свой email перед запуском. */
+var TEST_DECLINE_TO = '';
+
+function testDeclineMail() {
+  var to = TEST_DECLINE_TO || Session.getActiveUser().getEmail();
+  if (!to) throw new Error('Укажите TEST_DECLINE_TO или запустите под Google-аккаунтом');
+  var tpl = DECLINE_TEMPLATES[0];
+  var who = { company: 'Test Co', name: 'Test Founder' };
+  var result = sendDeclineMail(
+    to,
+    '[TEST] ' + tpl.subject,
+    fillTemplate(tpl.body, who) + '\n\n— test message, please ignore'
+  );
+  if (!result.ok) throw new Error(result.error);
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+function declineHtmlBody(text) {
+  var safe = String(text || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+  return '<div style="font-family:Manrope,Arial,sans-serif;font-size:15px;line-height:1.6;color:#010101;">'
+    + safe + '</div>';
 }
 
 /* Приложенный pitch deck → папка «V17 pitch decks» на Drive владельца скрипта.
@@ -835,15 +878,24 @@ function handleCallback(cb) {
       tg('answerCallbackQuery', { callback_query_id: cb.id, text: 'Нет email или шаблона', show_alert: true });
       return;
     }
-    sendDeclineMail(who.email, fillTemplate(tpl.subject, who), fillTemplate(tpl.body, who));
+    var mailResult = sendDeclineMail(who.email, fillTemplate(tpl.subject, who), fillTemplate(tpl.body, who));
+    if (!mailResult.ok) {
+      tg('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: mailResult.error,
+        show_alert: true
+      });
+      return;
+    }
     sheet.getRange(rowNum, statusCol).setValue('declined (' + tpl.label + ')');
     var notionResult = markNotionDeclined(
       sheet.getRange(rowNum, SHEET_HEADERS.indexOf('Notion URL') + 1).getValue()
     );
     var notionNote = notionResult.ok ? ' · Notion → Declined' : ' · ⚠️ Notion не обновлён';
+    var mailNote = mailResultNote(mailResult);
     tg('answerCallbackQuery', {
       callback_query_id: cb.id,
-      text: 'Отказ отправлен на ' + who.email + notionNote,
+      text: 'Отказ отправлен на ' + who.email + mailNote + notionNote,
       show_alert: !notionResult.ok
     });
     if (kind === 'ds') {
@@ -852,7 +904,7 @@ function handleCallback(cb) {
     appendToMessage(
       cb,
       '\n\n❌ <b>Отказ отправлен</b> («' + esc(tpl.label) + '», ' +
-        esc(cb.from.first_name || '') + ')' + esc(notionNote)
+        esc(cb.from.first_name || '') + ')' + esc(mailNote) + esc(notionNote)
     );
   }
 }
@@ -882,7 +934,15 @@ function handleDraftReply(msg) {
   var who = applicantAt(sheet, rowNum);
   var templates = getDeclineTemplates();
   var subject = (templates[0] && templates[0].subject) || DECLINE_MAIL_SUBJECT;
-  sendDeclineMail(who.email, subject, msg.text);
+  var mailResult = sendDeclineMail(who.email, subject, msg.text);
+  if (!mailResult.ok) {
+    tg('sendMessage', {
+      chat_id: msg.chat.id,
+      reply_to_message_id: msg.message_id,
+      text: '⚠️ ' + mailResult.error
+    });
+    return;
+  }
   sheet.getRange(rowNum, SHEET_HEADERS.indexOf('Status') + 1).setValue('declined (с правкой)');
   var notionResult = markNotionDeclined(
     sheet.getRange(rowNum, SHEET_HEADERS.indexOf('Notion URL') + 1).getValue()
@@ -897,6 +957,7 @@ function handleDraftReply(msg) {
     chat_id: msg.chat.id,
     reply_to_message_id: msg.message_id,
     text: '❌ Отказ отправлен на ' + who.email + ' — вашим текстом.' +
+      mailResultNote(mailResult) +
       (notionResult.ok ? ' Notion → Declined.' : ' ⚠️ Notion не обновлён: ' + notionResult.error)
   });
 }
