@@ -31,6 +31,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
+# httpx logs full request URLs at INFO, which would leak TELEGRAM_TOKEN
+# (…/bot<token>/getUpdates). Keep only warnings/errors from HTTP libs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("v17-apply-bot")
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
