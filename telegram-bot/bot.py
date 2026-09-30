@@ -47,11 +47,11 @@ PROXY_URL = os.environ.get(
     "https://lightgray-oryx-237895.hostingersite.com/wp-json/srm/v1/v17",
 ).strip()
 CONTACT_FALLBACK = "deals@v17.vc"
-BOT_VERSION = "2026-08-19a"
+BOT_VERSION = "2026-09-30a"
 SUBMITTED = (
-    "Application submitted\n\n"
-    "We will look at it. If your application fits our criteria, "
-    "we will reach out within a few weeks over email.\n\n"
+    "Request submitted\n\n"
+    "We will look at it. If there is a fit — financing, marketing or "
+    "analytics — we will reach out within a few weeks over email.\n\n"
     "Thank you!"
 )
 
