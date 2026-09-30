@@ -191,12 +191,16 @@ class ApplicationPath(unittest.TestCase):
         self.assertEqual(bot.resume_step(ans, "hard_fail"), "mrr")
         self.assertEqual(bot.resume_step(ans, "gate"), "mrr")
 
+    def test_resume_hard_fail_with_mrr_goes_to_gate(self):
+        ans = gate(mrr=1000)
+        self.assertEqual(bot.resume_step(ans, "hard_fail"), "gate")
+
     def test_resume_keeps_real_step(self):
         ans = gate(company_name="Acme")
         self.assertEqual(bot.resume_step(ans, "website"), "website")
 
-    def test_infer_hard_fail(self):
-        self.assertEqual(bot.infer_step(gate(mrr=1000)), "hard_fail")
+    def test_infer_low_mrr_goes_to_gate_not_hard_fail(self):
+        self.assertEqual(bot.infer_step(gate(mrr=1000)), "gate")
 
     def test_infer_gate_when_filter_done(self):
         self.assertEqual(bot.infer_step(gate()), "gate")
@@ -205,9 +209,9 @@ class ApplicationPath(unittest.TestCase):
         self.assertEqual(bot.submit_missing(gate()), "company_name")
         self.assertEqual(bot.submit_missing({"company_name": "X"}), "segment")
 
-    def test_submit_hard_mrr_blocked(self):
+    def test_submit_hard_mrr_is_not_blocked(self):
         ans = gate(mrr=1000, company_name="X", contact_email="a@co.com")
-        self.assertEqual(bot.submit_missing(ans), "mrr")
+        self.assertEqual(bot.submit_missing(ans), "website")
 
     def test_complete_cohort_application_can_submit(self):
         ans = gate(
@@ -309,13 +313,33 @@ class HandlerFlow(unittest.IsolatedAsyncioTestCase):
         store = bot.data(ctx)
         store["step"] = "market"
         store["answers"].update(segment=["b2c"], stage="seed", mrr=7000)
-        with patch.object(bot, "send", new=AsyncMock()):
+        with patch.object(bot, "send", new=AsyncMock()) as send:
             update, _ = callback_update("t:market:global")
             await bot.on_callback(update, ctx)
             update, _ = callback_update("n:market")
             await bot.on_callback(update, ctx)
             self.assertEqual(store["step"], "gate")
             self.assertTrue(store["answers"]["below_soft_threshold"])
+            self.assertIn("Not yet", send.call_args[0][1])
+
+            update, _ = callback_update("nav:continue")
+            await bot.on_callback(update, ctx)
+            self.assertEqual(store["step"], "company_name")
+
+    async def test_hard_gate_offers_continue_not_dead_end(self):
+        ctx = context()
+        store = bot.data(ctx)
+        store["step"] = "market"
+        store["answers"].update(segment=["b2c"], stage="seed", mrr=1000)
+        with patch.object(bot, "send", new=AsyncMock()) as send:
+            update, _ = callback_update("t:market:global")
+            await bot.on_callback(update, ctx)
+            update, _ = callback_update("n:market")
+            await bot.on_callback(update, ctx)
+            self.assertEqual(store["step"], "gate")
+            self.assertTrue(store["answers"]["below_soft_threshold"])
+            self.assertIn("Not yet", send.call_args[0][1])
+            self.assertNotIn("below threshold", send.call_args[0][1].lower())
 
             update, _ = callback_update("nav:continue")
             await bot.on_callback(update, ctx)
@@ -363,6 +387,15 @@ class ClientCopy(unittest.TestCase):
         self.assertIn("over email", bot.SUBMITTED)
         self.assertIn("Thank you!", bot.SUBMITTED)
         self.assertNotIn("look at the numbers", bot.SUBMITTED)
+
+    def test_not_yet_offer_has_no_threshold_dollars(self):
+        self.assertIn("Not yet", bot.NOT_YET_OFFER)
+        self.assertIn("marketing or analytics", bot.NOT_YET_OFFER)
+        self.assertNotIn("$", bot.NOT_YET_OFFER)
+        self.assertNotIn("PASS", bot.NOT_YET_OFFER)
+        self.assertNotIn("FAIL", bot.NOT_YET_OFFER)
+        self.assertNotIn("$10k", bot.THESIS)
+        self.assertNotIn("$30k", bot.THESIS)
 
 
 class SessionHelpers(unittest.TestCase):
