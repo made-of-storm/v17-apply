@@ -295,8 +295,6 @@ def infer_step(ans: dict) -> str:
     missing = gate_incomplete_step(ans)
     if missing:
         return missing
-    if mrr_verdict(ans) == "hard":
-        return "hard_fail"
     if not is_answered("company_name", ans):
         return "gate"
     for step in APP_STEPS:
@@ -310,9 +308,11 @@ def infer_step(ans: dict) -> str:
 
 
 def resume_step(ans: dict, stored: str | None = None) -> str:
-    # Never resume into a decline unless the applicant actually typed MRR.
-    if stored == "hard_fail" and ans.get("mrr") is None:
-        return infer_step(ans)
+    # Старые сессии могли остаться на hard_fail — ведём на gate (not yet + continue).
+    if stored == "hard_fail":
+        if ans.get("mrr") is None:
+            return infer_step(ans)
+        return "gate"
     known = set(GATE_ORDER) | set(APP_STEPS) | {"hard_fail"}
     if stored and stored not in ("welcome", "thesis", "hard_fail", "gate") and stored in known:
         if skip_step(stored, ans):
@@ -339,8 +339,6 @@ def next_step(current: str, ans: dict) -> str:
 
 
 def submit_missing(ans: dict) -> str | None:
-    if mrr_verdict(ans) == "hard":
-        return "mrr"
     if mrr_verdict(ans) == "incomplete":
         return gate_incomplete_step(ans)
     for step in APP_STEPS:
@@ -452,33 +450,25 @@ def force_reply(placeholder: str) -> ForceReply:
 
 WELCOME = (
     "V17 — capital and marketing for a product that can outpace its own growth\n\n"
-    "4 quick questions first — if we're a clear mismatch, we'll say so right away. "
-    "Then a short application. 5-7 minutes in total"
+    "4 quick questions first — we check the basics and show whether financing "
+    "is a fit, or whether marketing / analytics is the better next step. "
+    "Then a short form. 5-7 minutes in total"
 )
 
 THESIS = (
-    "<b>What we invest in</b>\n\n"
+    "<b>What we look for</b>\n\n"
     "<b>Segments</b>\n"
     "· <b>B2C</b> Consumer, HealthTech, FinTech, EdTech, Wellbeing &amp; Lifestyle\n"
     "· <b>B2B</b> MarTech, AI assistants and Productivity Tools, Future of Work\n\n"
     "<b>Stage</b> Seed – Series A+\n\n"
-    "<b>MRR</b>\n"
-    "· from <b>$10k</b> (B2C)\n"
-    "· from <b>$30k</b> (B2B)\n\n"
+    "<b>MRR</b> Meaningful recurring revenue with traction\n\n"
     "<b>Markets</b> Global, US, Europe"
 )
 
-HARD_DECLINE = (
-    "<b>Thank you for your interest in V17.</b> Current MRR is below the "
-    "minimum we look at right now. Please reach out again once you've grown "
-    "further — we'd be glad to take another look"
-)
-
-SOFT_DECLINE = (
-    "This may not match our current focus — MRR below threshold "
-    "(${soft} for {label}). You can still submit it — it will go into a "
-    "separate pool for cohort financing and reconsideration, though we cannot "
-    "guarantee a response"
+# Клиенту без цифр порога и без PASS/FAIL (просьба Лены).
+NOT_YET_OFFER = (
+    "<b>Not yet</b> for financing at this stage. We can look at marketing or "
+    "analytics support — continue the form and we'll follow up"
 )
 
 
@@ -605,28 +595,17 @@ async def ask_gate(update, context, ans, tmp):
         await ask(update, context)
         return
     verdict = mrr_verdict(ans)
-    if verdict == "hard":
-        ans["below_soft_threshold"] = False
-        data(context)["step"] = "hard_fail"
-        await send(
-            update,
-            HARD_DECLINE,
-            InlineKeyboardMarkup([[InlineKeyboardButton("Start over", callback_data="nav:restart")]]),
-            html=True,
-        )
-        return
-    if verdict == "soft":
+    if verdict in ("hard", "soft"):
+        # Внутри помечаем ниже ориентира; клиенту — not yet + путь marketing/analytics.
         ans["below_soft_threshold"] = True
-        label = "B2C" if is_b2c_only(ans) else "B2B"
-        soft = mrr_soft(ans)
-        text = SOFT_DECLINE.format(soft=f"{soft:,}".replace(",", " "), label=label)
         await send(
             update,
-            text,
+            NOT_YET_OFFER,
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("Continue anyway", callback_data="nav:continue")],
+                [InlineKeyboardButton("Continue", callback_data="nav:continue")],
                 [InlineKeyboardButton("Stop here", callback_data="nav:stop")],
             ]),
+            html=True,
         )
         return
     ans["below_soft_threshold"] = False
@@ -636,16 +615,13 @@ async def ask_gate(update, context, ans, tmp):
 
 
 async def ask_hard_fail(update, context, ans, tmp):
+    """Совместимость со старыми сессиями: больше не тупик, а not yet + continue."""
     if ans.get("mrr") is None:
         data(context)["step"] = "mrr"
         await ask(update, context)
         return
-    await send(
-        update,
-        HARD_DECLINE,
-        InlineKeyboardMarkup([[InlineKeyboardButton("Start over", callback_data="nav:restart")]]),
-        html=True,
-    )
+    data(context)["step"] = "gate"
+    await ask_gate(update, context, ans, tmp)
 
 
 async def q(step: str, ans: dict, body: str) -> str:
@@ -656,9 +632,9 @@ async def q(step: str, ans: dict, body: str) -> str:
 async def ask_company_name(update, context, ans, tmp):
     prefix = ""
     if tmp.pop("fit_ok", None):
-        prefix = "Thanks — we're a fit on the basics.\n\n"
+        prefix = "Thanks — fit on the basics.\n\n"
     elif tmp.pop("fit_soft", None):
-        prefix = "We'll take this into the separate pool.\n\n"
+        prefix = "Got it — not yet for financing; we'll look at marketing or analytics.\n\n"
     await send_text_question(
         update,
         prefix + await q(
@@ -908,7 +884,7 @@ async def ask_review(update, context, ans, tmp):
         update,
         review_text(ans),
         InlineKeyboardMarkup([
-            [InlineKeyboardButton("Submit application", callback_data="nav:submit")],
+            [InlineKeyboardButton("Work with us", callback_data="nav:submit")],
             [InlineKeyboardButton("← Edit last answer", callback_data="nav:back")],
             [InlineKeyboardButton("Start over", callback_data="nav:restart")],
         ]),
@@ -1071,7 +1047,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await go_next(update, context)
         return
     if raw == "nav:continue":
-        if step != "gate" or not ans.get("below_soft_threshold"):
+        if step not in ("gate", "hard_fail") or not ans.get("below_soft_threshold"):
             await ask(update, context)
             return
         tmp["fit_soft"] = True

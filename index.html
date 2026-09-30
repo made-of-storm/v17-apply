@@ -347,10 +347,7 @@
     <div class="thesis-line"><span class="thesis-tag">Stage</span><span>Seed - Series A+</span></div>
     <div class="thesis-line">
       <span class="thesis-tag">MRR</span>
-          <span>
-            <span class="seg-line"><b>B2C: from $10k</b><span class="mrr-note"> — MRR</span></span>
-            <span class="seg-line"><b>B2B: from $30k</b><span class="mrr-note"> — MRR</span></span>
-          </span>
+      <span>Meaningful recurring revenue with traction</span>
     </div>
     <div class="thesis-line"><span class="thesis-tag">Markets</span><span>Global, US, Europe</span></div>
 
@@ -382,7 +379,7 @@
       <!-- ШАГ 1: Quick Fit Check -->
       <div class="step visible" data-step="0">
         <h2>Quick fit check</h2>
-        <p class="step-sub">Four quick questions — if we're a clear mismatch, we'll say so right away and save you your time</p>
+        <p class="step-sub">Four quick questions — we check the basics and show whether financing is a fit, or whether marketing / analytics is the better next step</p>
 
         <!-- Поля шага 1 — строго по ТЗ «Заявка для заполнения командами»,
              НЕ по Notion-форме: без B2G/Other в сегментах, без Pre-Seed,
@@ -642,8 +639,8 @@ let MRR_HARD_OTHER = 15000;
 
 let currentStep = 0;
 const totalSteps = 4;
-let softFail = false;   /* hard <= MRR < soft: предупреждение, проход разрешён */
-let hardFail = false;   /* MRR < hard: финальный отказ, отправки нет */
+let softFail = false;   /* hard <= MRR < soft: внутренний soft-пул */
+let hardFail = false;   /* MRR < hard: внутренний hard-пул; клиенту — not yet, отправка разрешена */
 
 const data = {};
 
@@ -918,41 +915,27 @@ function evaluateGate(){
   softFail = false;
   hardFail = false;
 
-  /* Подсказка в поле MRR — минимальный (жёсткий) порог выбранного сегмента:
-     B2C — 5,000, B2B и B2B2C — 15,000. Чтобы человек сразу видел ориентир
-     (просьба Леры 14.08). */
-  if(mrrEl) mrrEl.placeholder = mrrHard().toLocaleString('en-US');
-
+  /* Пороги считаем только внутри — клиенту цифры не показываем
+     (просьба Лены: fit / not yet, без PASS/FAIL и без порога). */
   if(seg.length && mrrEntered){
     if(mrr < mrrHard()) hardFail = true;
     else if(mrr < mrrSoft()) softFail = true;
   }
 
-  if(hardFail){
-    /* Ниже hard-порога: финальный отказ, шаг 2 не открывается,
-       данные никуда не сохраняются (кнопки Next нет). */
-    slot.innerHTML = '<div class="decline-box"><b>Thank you for your interest in V17.</b> Current MRR is below the minimum we look at right now. Please reach out again once you\'ve grown further — we\'d be glad to take another look</div>';
-  } else if(softFail){
-    /* Между hard и soft: предупреждаем, но пропускаем дальше — заявка
-       попадёт в отдельный пул (cohort financing / пересмотр). */
-    const label = isB2cOnly() ? 'B2C' : 'B2B';
-    slot.innerHTML = '<div class="decline-box">This may not match our current focus — MRR below threshold ($' +
-      mrrSoft().toLocaleString('en-US') + ' for ' + label + '). You can still submit it — it will go into a separate pool for cohort financing and reconsideration, though we cannot guarantee a response</div>';
+  if(hardFail || softFail){
+    /* Ниже ориентира: не отказ. Предлагаем маркетинг / аналитику, анкету можно продолжить. */
+    slot.innerHTML = '<div class="decline-box"><b>Not yet</b> for financing at this stage. We can look at marketing or analytics support — continue the form and we\'ll follow up</div>';
   } else {
     slot.innerHTML = '';
   }
   updateNextLabel();
 }
 
-/* На шаге 1 при hard-отказе кнопку Next убираем совсем (просьба Леры),
-   в soft-зоне она остаётся обычным «Next» — анкета открывается как всегда. */
 function updateNextLabel(){
   const btn = document.getElementById('btnNext');
+  btn.style.display = '';
   if(currentStep === 0){
     btn.textContent = 'Next';
-    btn.style.display = hardFail ? 'none' : '';
-  } else {
-    btn.style.display = '';
   }
 }
 
@@ -980,11 +963,11 @@ function updateGauge(){
   if(mrr === 0 && ltvcac === 0 && ret30 === 0){
     verdictEl.textContent = 'Fill in the form — the score updates as you go';
   } else if(hardFail || softFail){
-    verdictEl.textContent = 'Does not meet current fund thresholds — see the note above';
+    verdictEl.textContent = 'Not yet — financing is early; marketing or analytics may fit better';
   } else if(capitalScore >= 70 && mediaScore >= 50){
-    verdictEl.textContent = 'Strong match — this application goes into the priority pool';
+    verdictEl.textContent = 'Fit — strong match on the basics';
   } else {
-    verdictEl.textContent = 'Partial match — we will review it alongside other applications';
+    verdictEl.textContent = 'Fit — we will review it alongside other applications';
   }
 }
 
@@ -1001,7 +984,7 @@ function showStep(i){
   }
   if(i === 1) updateRaiseVisibility();
   document.getElementById('btnBack').disabled = (i === 0);
-  document.getElementById('btnNext').textContent = (i === totalSteps - 1) ? 'Submit application' : 'Next';
+  document.getElementById('btnNext').textContent = (i === totalSteps - 1) ? 'Work with us' : 'Next';
   updateNextLabel();
   if(v17Booted) v17ScrollToCard(stepEl);
 }
@@ -1042,7 +1025,6 @@ window.addEventListener('message', function(ev){
 });
 
 document.getElementById('btnNext').addEventListener('click', async function(){
-  if(currentStep === 0 && hardFail) return;   /* ниже hard-порога дальше не пускаем */
   const check = validateStep(currentStep);
   if(!check.valid){
     if(check.firstInvalid) check.firstInvalid.scrollIntoView({behavior:'smooth', block:'center'});
@@ -1075,9 +1057,8 @@ async function submitForm(){
     amount_raising: moneyValue('amount_raising'),
     post_money: moneyValue('post_money'),
     marketing_spend: moneyValue('marketing_spend'),
-    /* Заявка из soft-зоны: MRR ниже порога, но выше hard — помечаем,
-       чтобы в таблице/Notion/TG было видно, что это отдельный пул. */
-    below_soft_threshold: softFail,
+    /* Ниже ориентира (soft или hard) — отдельный пул для команды; клиенту уже показали not yet. */
+    below_soft_threshold: !!(softFail || hardFail),
     submitted_at: new Date().toISOString(),
     source: 'site_form'
   });
@@ -1096,12 +1077,12 @@ async function submitForm(){
     } else {
       console.log('SUBMIT_URL not configured — payload:', payload);
     }
-    document.querySelector('.card').innerHTML = '<div class="success-box"><div class="mark">&#10003;</div><h2>Application submitted</h2><p class="step-sub">We will look at the numbers and get back to you. If your application fits our criteria, we will reach out within a few weeks. Please do not be discouraged if you do not hear back from us — those are just our current focus areas, not a judgment on your company</p></div>';
+    document.querySelector('.card').innerHTML = '<div class="success-box"><div class="mark">&#10003;</div><h2>Request submitted</h2><p class="step-sub">We will look at it and get back to you. If there is a fit — financing, marketing or analytics — we will reach out within a few weeks</p></div>';
     v17ScrollToCard();
   } catch(err){
     document.getElementById('submitResult').innerHTML = '<div class="decline-box">Something went wrong — please try again or email <a href="mailto:' + CONTACT_FALLBACK_EMAIL + '">' + CONTACT_FALLBACK_EMAIL + '</a></div>';
     btn.disabled = false;
-    btn.textContent = 'Submit application';
+    btn.textContent = 'Work with us';
   }
 }
 
