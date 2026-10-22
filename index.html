@@ -607,8 +607,9 @@
    ============================================================ */
 const SUBMIT_URL = "https://script.google.com/macros/s/AKfycbx30DBhsRrIxt55Y6MslmZvwqp9dTLhITs27Wdq2M5lpZ8yJZypa7Ryuu1oIzl_13Z2SA/exec";
 /* Резервный канал: у части пользователей (РФ) блокируется script.google.com.
-   Тогда запрос уходит на этот прокси, который переправляет его в Google. */
-const PROXY_URL = "https://lightgray-oryx-237895.hostingersite.com/wp-json/srm/v1/v17";
+   Тогда запрос уходит на этот прокси (Node.js на Hostinger, без PHP),
+   который переправляет его в Google, а если Google не ответил — в Telegram-бот. */
+const PROXY_URL = "https://lightsteelblue-lion-878581.hostingersite.com/";
 const CONTACT_FALLBACK_EMAIL = "deals@v17.vc";
 
 /* fetch с автоматическим переключением на прокси. */
